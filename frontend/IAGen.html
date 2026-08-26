@@ -3,43 +3,219 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>AI Image Generator</title>
+    <title>MirageAI | Prompt to Image</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #111827;
+            --primary: #60a5fa;
+            --primary-dark: #2563eb;
+            --text: #e5e7eb;
+            --muted: #94a3b8;
+            --border: #334155;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            background: linear-gradient(135deg, #020817, #111827 30%, #0f172a);
+            color: var(--text);
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+        }
+
+        .app {
+            width: min(960px, 100%);
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 24px;
+            box-shadow: 0 18px 50px rgba(0,0,0,0.35);
+        }
+
+        h1 {
+            margin: 0 0 10px;
+            font-size: clamp(2rem, 4vw, 3rem);
+        }
+
+        .subtitle {
+            color: var(--muted);
+            margin-bottom: 22px;
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        input, select, button {
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            font-size: 1rem;
+        }
+
+        input, select {
+            background: rgba(15, 23, 42, 0.9);
+            color: var(--text);
+            padding: 14px 16px;
+        }
+
+        button {
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            border: none;
+            color: white;
+            font-weight: 700;
+            cursor: pointer;
+            padding: 0 18px;
+            transition: transform 0.15s ease, opacity 0.15s ease;
+        }
+
+        button:hover { transform: translateY(-1px); }
+        button:disabled { opacity: 0.6; cursor: wait; }
+
+        .result-panel {
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            background: rgba(15, 23, 42, 0.7);
+            min-height: 420px;
+            display: grid;
+            place-items: center;
+            overflow: hidden;
+        }
+
+        .result-panel img {
+            display: block;
+            width: min(100%, 720px);
+            aspect-ratio: 3 / 2;
+            object-fit: cover;
+            border-radius: 12px;
+            background: #0b1120;
+        }
+
+        .placeholder {
+            color: var(--muted);
+            text-align: center;
+            padding: 24px;
+            line-height: 1.6;
+        }
+
+        .status {
+            margin-top: 12px;
+            color: var(--muted);
+            font-size: 0.95rem;
+            min-height: 1.25rem;
+        }
+
+        @media (max-width: 640px) {
+            .controls {
+                grid-template-columns: 1fr;
+            }
+            .app { padding: 18px; }
+        }
+    </style>
 </head>
 <body>
+    <main class="app">
+        <h1>MirageAI</h1>
+        <p class="subtitle">Turn a simple idea into a visual concept in seconds.</p>
 
-<h1>AI Image Generator</h1>
+        <div class="controls">
+            <input id="prompt" type="text" placeholder="Describe your image..." maxlength="500" />
+            <select id="quality" aria-label="Select quality">
+                <option value="fast">Fast</option>
+                <option value="quality">Quality</option>
+            </select>
+            <select id="mode" aria-label="Select output type">
+                <option value="image">Image</option>
+                <option value="avatar">Avatar</option>
+            </select>
+            <button id="generateBtn" type="button">Generate</button>
+        </div>
 
-<input type="text" id="prompt" placeholder="Enter prompt">
-<button onclick="generate()">Generate</button>
+        <div class="result-panel">
+            <img id="result" alt="Generated result" hidden>
+            <div id="placeholder" class="placeholder">
+                Enter a prompt and click generate to create a new image.
+            </div>
+        </div>
+        <div id="status" class="status" aria-live="polite"></div>
+    </main>
 
-<br><br>
+    <script>
+        // Keep the connection simple: the browser talks to the backend on localhost.
+        const apiBaseUrl = 'http://127.0.0.1:8000';
 
-<img id="result" width="400" alt="Generated image result" title="Generated image"/>
+        const promptInput = document.getElementById('prompt');
+        const qualityInput = document.getElementById('quality');
+        const modeInput = document.getElementById('mode');
+        const resultImage = document.getElementById('result');
+        const placeholder = document.getElementById('placeholder');
+        const generateBtn = document.getElementById('generateBtn');
+        const statusBox = document.getElementById('status');
 
-<script>
-async function generate() {
-    const prompt = document.getElementById("prompt").value.trim();
-    if (!prompt) {
-        alert("Please enter a prompt first.");
-        return;
-    }
+        function setStatus(message) {
+            statusBox.textContent = message;
+        }
 
-    const response = await fetch("http://127.0.0.1:8000/generate?prompt=" + encodeURIComponent(prompt), {
-        method: "POST"
-    });
+        async function generate() {
+            const prompt = promptInput.value.trim();
+            if (!prompt) {
+                alert('Please enter a prompt first.');
+                promptInput.focus();
+                return;
+            }
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        alert("Generation failed: " + errorText);
-        return;
-    }
+            generateBtn.disabled = true;
+            generateBtn.textContent = 'Generating...';
+            setStatus('Sending prompt to the API...');
 
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
+            const endpoint = modeInput.value === 'avatar' ? '/generate-avatar' : '/generate';
 
-    document.getElementById("result").src = url;
-}
-</script>
+            try {
+                const response = await fetch(
+                    `${apiBaseUrl}${endpoint}?prompt=${encodeURIComponent(prompt)}&quality=${encodeURIComponent(qualityInput.value)}`,
+                    { method: 'POST' }
+                );
 
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(errorText || 'Generation failed');
+                }
+
+                const blob = await response.blob();
+                const objectUrl = URL.createObjectURL(blob);
+
+                // Revoke any old object URL before replacing the image source.
+                if (resultImage.src && resultImage.src.startsWith('blob:')) {
+                    URL.revokeObjectURL(resultImage.src);
+                }
+
+                resultImage.src = objectUrl;
+                resultImage.hidden = false;
+                placeholder.hidden = true;
+                setStatus(modeInput.value === 'avatar' ? 'Avatar ready.' : 'Image ready.');
+            } catch (error) {
+                setStatus('Generation failed.');
+                alert(`Generation failed: ${error.message}`);
+            } finally {
+                generateBtn.disabled = false;
+                generateBtn.textContent = 'Generate';
+            }
+        }
+
+        generateBtn.addEventListener('click', generate);
+        promptInput.addEventListener('keydown', (event) => {
+            // Press Enter to generate without clicking the button.
+            if (event.key === 'Enter') {
+                generate();
+            }
+        });
+    </script>
 </body>
 </html>
