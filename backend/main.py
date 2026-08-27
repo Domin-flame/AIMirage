@@ -6,7 +6,12 @@ available yet, it falls back to a styled placeholder image so the app still work
 
 import gc
 import io
+import math
+import os
+import wave
+from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -37,6 +42,68 @@ app.add_middleware(
 )
 
 _pipe = None
+
+
+def load_local_env_file():
+    """Load environment variables from a .env file in the project root when present."""
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    if not env_file.exists():
+        return
+
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"'))
+
+
+load_local_env_file()
+
+
+def get_cloud_model_config():
+    """Return the configured cloud model settings if the app is set up for external inference."""
+    token = os.getenv("HF_TOKEN")
+    model = os.getenv("HF_MODEL")
+    if token and model:
+        return {
+            "token": token,
+            "model": model,
+            "url": f"https://api-inference.huggingface.co/models/{model}",
+        }
+    return None
+
+
+def call_cloud_generation(prompt: str, quality: str, is_avatar: bool = False) -> Image.Image | None:
+    """Generate an image using a hosted Hugging Face inference endpoint when configured."""
+    config = get_cloud_model_config()
+    if config is None:
+        return None
+
+    payload = {"inputs": prompt}
+    if quality == "quality":
+        payload["parameters"] = {"guidance_scale": 7.5, "num_inference_steps": 25}
+    else:
+        payload["parameters"] = {"guidance_scale": 6.0, "num_inference_steps": 12}
+
+    if is_avatar:
+        payload["parameters"]["negative_prompt"] = "blurry, low quality, duplicate face, deformed hands, text, watermark"
+
+    response = httpx.post(
+        config["url"],
+        headers={"Authorization": f"Bearer {config['token']}"},
+        json=payload,
+        timeout=90,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Cloud model request failed: {response.status_code}")
+
+    image_bytes = response.content
+    if not image_bytes:
+        raise RuntimeError("Cloud model returned an empty response.")
+
+    image = Image.open(io.BytesIO(image_bytes))
+    return image.convert("RGB")
 
 
 def get_pipe():
@@ -85,6 +152,13 @@ def generate_avatar_fallback_image(prompt: str, width: int = 768, height: int = 
 
 def build_generated_image(prompt: str, quality: str, is_avatar: bool = False) -> Image.Image:
     """Generate either a concept image or a portrait/avatar using the app pipeline."""
+    cloud_image = None
+    if get_cloud_model_config() is not None:
+        cloud_image = call_cloud_generation(prompt, quality=quality, is_avatar=is_avatar)
+
+    if cloud_image is not None:
+        return cloud_image
+
     pipe = get_pipe()
 
     if quality == "quality":
@@ -111,12 +185,82 @@ def build_generated_image(prompt: str, quality: str, is_avatar: bool = False) ->
     return image
 
 
+def generate_speech_wav(text: str, sample_rate: int = 22050, duration_per_char: float = 0.09) -> bytes:
+    """Generate a lightweight synthetic WAV file from text for local demo use."""
+    cleaned = text.strip()[:200]
+    if not cleaned:
+        raise ValueError("Text cannot be empty.")
+
+    sample_count = int(sample_rate * max(0.7, len(cleaned) * duration_per_char))
+    frames = bytearray()
+    for idx, char in enumerate(cleaned):
+        base_freq = 180 + (ord(char.lower()) % 26) * 12
+        mod = 1.0 + (idx % 5) * 0.18
+        phase = idx * 0.35
+        for sample_index in range(int(sample_rate * duration_per_char)):
+            t = sample_index / sample_rate
+            value = math.sin(2 * math.pi * base_freq * mod * (t + phase)) * 0.35
+            if char.isspace():
+                value *= 0.2
+            if char in ",.!?;:":
+                value *= 0.8
+            pcm = int(max(-1.0, min(1.0, value)) * 32767)
+            frames.extend(int(pcm).to_bytes(2, byteorder="little", signed=True))
+
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(bytes(frames[:sample_count * 2]))
+    return wav_buffer.getvalue()
+
+
+def generate_avatar_gif(prompt: str, size: tuple[int, int] = (256, 256), frames: int = 6) -> bytes:
+    """Generate a lightweight animated GIF by varying a portrait-like fallback over several frames."""
+    palette = [
+        (18, 24, 36),
+        (28, 38, 52),
+        (66, 88, 108),
+        (104, 138, 170),
+        (147, 176, 195),
+        (120, 144, 178),
+    ]
+
+    frame_images = []
+    for frame_index in range(frames):
+        image = Image.new("RGB", size, palette[frame_index % len(palette)])
+        draw = ImageDraw.Draw(image)
+        cx = size[0] // 2
+        cy = size[1] // 2
+        head_y = 10 + frame_index % 3
+        draw.ellipse((cx - 52, cy - 64 + head_y, cx + 52, cy + 20 + head_y), fill=(246, 210, 180))
+        draw.ellipse((cx - 68, cy - 80 + head_y, cx + 68, cy + 10 + head_y), fill=(40, 52, 68))
+        draw.rectangle((cx - 80, cy + 20 + head_y, cx + 80, cy + 92 + head_y), fill=(77, 96, 122))
+        draw.text((12, 12), "MirageAI", fill=(255, 255, 255))
+        draw.text((12, 34), prompt[:20], fill=(200, 220, 255))
+        frame_images.append(image)
+
+    gif_buffer = io.BytesIO()
+    frame_images[0].save(
+        gif_buffer,
+        format="GIF",
+        save_all=True,
+        append_images=frame_images[1:],
+        duration=120,
+        loop=0,
+        optimize=False,
+    )
+    return gif_buffer.getvalue()
+
+
 @app.get("/health")
 def health_check():
     """Basic health endpoint for checking system readiness."""
     return {
         "status": "ok",
-        "model_available": StableDiffusionPipeline is not None and torch is not None,
+        "local_model_available": StableDiffusionPipeline is not None and torch is not None,
+        "cloud_model_configured": get_cloud_model_config() is not None,
     }
 
 
@@ -170,6 +314,48 @@ def generate_avatar(
     return StreamingResponse(
         buffer,
         media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/speak")
+def speak_text(
+    text: str = Query(..., min_length=1, max_length=500),
+):
+    """Generate a lightweight WAV response from text for local voice previewing."""
+    clean_text = text.strip()
+    if not clean_text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+
+    try:
+        audio_bytes = generate_speech_wav(clean_text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Speech generation failed: {exc}") from exc
+
+    return StreamingResponse(
+        io.BytesIO(audio_bytes),
+        media_type="audio/wav",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/generate-video")
+def generate_video(
+    prompt: str = Query(..., min_length=1, max_length=500),
+):
+    """Generate a small animated GIF row for avatar/video demo flows."""
+    clean_prompt = prompt.strip()
+    if not clean_prompt:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
+
+    try:
+        gif_bytes = generate_avatar_gif(clean_prompt)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Video generation failed: {exc}") from exc
+
+    return StreamingResponse(
+        io.BytesIO(gif_bytes),
+        media_type="image/gif",
         headers={"Cache-Control": "no-store"},
     )
 

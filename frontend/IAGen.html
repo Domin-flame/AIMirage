@@ -76,6 +76,10 @@
             transition: transform 0.15s ease, opacity 0.15s ease;
         }
 
+        .secondary-btn {
+            background: linear-gradient(135deg, #1d4ed8, #4f46e5);
+        }
+
         button:hover { transform: translateY(-1px); }
         button:disabled { opacity: 0.6; cursor: wait; }
 
@@ -136,6 +140,7 @@
                 <option value="avatar">Avatar</option>
             </select>
             <button id="generateBtn" type="button">Generate</button>
+        <button id="speakBtn" type="button" class="secondary-btn">Speak</button>
         </div>
 
         <div class="result-panel">
@@ -157,6 +162,7 @@
         const resultImage = document.getElementById('result');
         const placeholder = document.getElementById('placeholder');
         const generateBtn = document.getElementById('generateBtn');
+        const speakBtn = document.getElementById('speakBtn');
         const statusBox = document.getElementById('status');
 
         function setStatus(message) {
@@ -209,7 +215,80 @@
             }
         }
 
+        async function speak() {
+            const prompt = promptInput.value.trim();
+            if (!prompt) {
+                alert('Please enter a prompt first.');
+                promptInput.focus();
+                return;
+            }
+
+            speakBtn.disabled = true;
+            setStatus('Generating voice...');
+
+            try {
+                const response = await fetch(
+                    `${apiBaseUrl}/speak?text=${encodeURIComponent(prompt)}`,
+                    { method: 'POST' }
+                );
+
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                const blob = await response.blob();
+                const audio = new Audio(URL.createObjectURL(blob));
+                audio.play();
+                setStatus('Voice ready.');
+            } catch (error) {
+                setStatus('Voice generation failed.');
+                alert(`Voice generation failed: ${error.message}`);
+            } finally {
+                speakBtn.disabled = false;
+            }
+        }
+
+        async function generateVideo() {
+            const prompt = promptInput.value.trim();
+            if (!prompt) {
+                alert('Please enter a prompt first.');
+                promptInput.focus();
+                return;
+            }
+
+            generateBtn.disabled = true;
+            setStatus('Generating animated avatar...');
+
+            try {
+                const response = await fetch(
+                    `${apiBaseUrl}/generate-video?prompt=${encodeURIComponent(prompt)}`,
+                    { method: 'POST' }
+                );
+
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                const blob = await response.blob();
+                const objectUrl = URL.createObjectURL(blob);
+                if (resultImage.src && resultImage.src.startsWith('blob:')) {
+                    URL.revokeObjectURL(resultImage.src);
+                }
+
+                resultImage.src = objectUrl;
+                resultImage.hidden = false;
+                placeholder.hidden = true;
+                setStatus('Animated avatar ready.');
+            } catch (error) {
+                setStatus('Animated avatar generation failed.');
+                alert(`Animated avatar generation failed: ${error.message}`);
+            } finally {
+                generateBtn.disabled = false;
+            }
+        }
+
         generateBtn.addEventListener('click', generate);
+        speakBtn.addEventListener('click', speak);
         promptInput.addEventListener('keydown', (event) => {
             // Press Enter to generate without clicking the button.
             if (event.key === 'Enter') {
